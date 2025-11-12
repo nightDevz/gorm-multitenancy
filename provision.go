@@ -26,10 +26,7 @@ func (r *TenantProvisioner) ProvisionTenant(ctx context.Context, schemaName stri
 		return err
 	}
 
-	// 2. Use fmt.Sprintf to build the DDL query.
-	// This is safe ONLY because we are using the 'safeSchemaName'
-	// variable which has been validated.
-	// We CANNOT use a parameter '?' for a schema name.
+	// 2. Use fmt.Sprintf for the CREATE SCHEMA DDL command.
 	createSchemaQuery := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", safeSchemaName)
 	if err := r.db.WithContext(ctx).Exec(createSchemaQuery).Error; err != nil {
 		return fmt.Errorf("failed to create schema: %w", err)
@@ -38,9 +35,10 @@ func (r *TenantProvisioner) ProvisionTenant(ctx context.Context, schemaName stri
 	// Create a new session for this specific tenant's migration
 	tenantDB := r.db.WithContext(ctx).Session(&gorm.Session{NewDB: true})
 
-	// 3. Set the search_path for this new session.
-	// This 'SET' command *can* use a parameter.
-	if err := tenantDB.Exec("SET search_path TO ?, public", safeSchemaName).Error; err != nil {
+	// 3. Use fmt.Sprintf for the SET search_path command.
+	// This is the line that fixes the new error.
+	setSearchPathQuery := fmt.Sprintf("SET search_path TO %s, public", safeSchemaName)
+	if err := tenantDB.Exec(setSearchPathQuery).Error; err != nil {
 		return fmt.Errorf("failed to set search_path for migration: %w", err)
 	}
 
