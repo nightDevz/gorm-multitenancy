@@ -50,7 +50,7 @@ func (r *TenantProvisioner) ProvisionTenant(ctx context.Context, schemaName stri
 			return fmt.Errorf("failed to create schema: %w", err)
 		}
 
-		// Assumes 'public.tenants' table exists
+		// Uses raw SQL for consistency, inserting into the auto-migrated public.tenants table
 		registerTenantQuery := "INSERT INTO public.tenants (schema_name) VALUES (?)"
 		if err := tx.Exec(registerTenantQuery, safeSchemaName).Error; err != nil {
 			return fmt.Errorf("failed to register tenant: %w", err)
@@ -66,9 +66,6 @@ func (r *TenantProvisioner) ProvisionTenant(ctx context.Context, schemaName stri
 	log.Printf("Tenant %s registered. Running migrations...", safeSchemaName)
 
 	// Create a new DSN scoped to the tenant's schema
-	// This is the key: all connections from this pool will have the search_path.
-	// Note: DSN format varies. This " " space separator works for lib/pq.
-	// For pgx, it might be "search_path=" + safeSchemaName
 	tenantDSN := fmt.Sprintf("%s search_path=%s,public", r.baseDSN, safeSchemaName)
 
 	tenantDB, err := sql.Open("postgres", tenantDSN) // Use your driver name

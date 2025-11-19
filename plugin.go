@@ -2,6 +2,7 @@ package multitenancy
 
 import (
 	"fmt"
+	"log"
 
 	"gorm.io/gorm"
 )
@@ -40,10 +41,16 @@ func (p *Plugin) Name() string {
 	return "GormMultitenancyPlugin"
 }
 
-// Initialize registers the GORM callbacks.
-// This version is corrected to avoid the undefined type error.
+// Initialize registers the GORM callbacks and AutoMigrates the registry table.
 func (p *Plugin) Initialize(db *gorm.DB) error {
-	// Register the callback for Create operations
+	// 1. Auto-migrate the public.tenants table immediately (Option 1).
+	log.Println("gorm-multitenancy: Checking for 'public.tenants' table...")
+	if err := db.AutoMigrate(&PublicTenant{}); err != nil {
+		return fmt.Errorf("gorm-multitenancy: failed to auto-migrate public.tenants: %w", err)
+	}
+	log.Println("gorm-multitenancy: 'public.tenants' table is ready.")
+
+	// 2. Register the callback for Create operations
 	if err := db.Callback().Create().Before("gorm:create").
 		Register("multitenancy:set_search_path", p.setSearchPathCallback); err != nil {
 		return fmt.Errorf("failed to register create callback: %w", err)

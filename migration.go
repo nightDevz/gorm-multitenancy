@@ -1,26 +1,13 @@
 package multitenancy
 
 import (
-	"database/sql" // Import database/sql
+	"database/sql"
 	"fmt"
 	"log"
 
 	"github.com/pressly/goose/v3"
 	"gorm.io/gorm"
-	// Import your postgres driver
-	// e.g., _ "github.com/lib/pq"
-	// or _ "github.com/jackc/pgx/v5/stdlib"
 )
-
-// Tenant model for reading from the public registry
-type Tenant struct {
-	SchemaName string `gorm:"column:schema_name"`
-}
-
-// TableName explicitly sets the table to the public schema
-func (Tenant) TableName() string {
-	return "public.tenants"
-}
 
 // MigrationRunner handles running migrations across all tenants.
 type MigrationRunner struct {
@@ -136,8 +123,8 @@ func (r *MigrationRunner) getTenantDB(safeSchemaName string) (*sql.DB, error) {
 }
 
 // getAllTenants fetches the list of schemas from the registry (uses master db).
-func (r *MigrationRunner) getAllTenants() ([]Tenant, error) {
-	var tenants []Tenant
+func (r *MigrationRunner) getAllTenants() ([]PublicTenant, error) {
+	var tenants []PublicTenant
 	if err := r.db.Find(&tenants).Error; err != nil {
 		return nil, fmt.Errorf("failed to get tenant list: %w", err)
 	}
