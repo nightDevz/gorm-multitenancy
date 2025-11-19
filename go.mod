@@ -1,4 +1,4 @@
-module github.com/nightDevz/gorm-multitenancy
+module github.com/nightDevz/gorm-multitenancy/v2
 
 go 1.25.1
 
