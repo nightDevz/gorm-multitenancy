@@ -1,6 +1,6 @@
 # gorm-multitenancy
 
-Latest stable v2.0.3
+Latest stable v2.0.4
 
 A complete solution for building multi-tenant applications with GORM using the **Schema-per-Tenant** strategy. This package provides automatic, secure, and request-scoped tenant isolation by manipulating PostgreSQL's `search_path`.
 
@@ -10,11 +10,10 @@ This package is designed for Go web services (using Gin) and provides utilities 
 
 ## ✨ Features
 
-  * **Auto-Initialized Registry (NEW):** Automatically creates the central **`public.tenants`** registry table when the GORM plugin is initialized. Manual SQL setup is no longer required.
-  * **Built-in CLI Migration Tool (NEW):** Provides the `gmt-migrate` binary to easily run schema updates across all tenants from the command line.
-  * **GORM Plugin:** Automatically sets `search_path` for all GORM queries (Create, Query, Update, Delete, Raw, etc.).
-  * **Gin Middleware:** Extracts a tenant ID from the `X-Tenant-ID` header, sanitizes it, and injects it into the request `context`.
-  * **Secure Provisioning:** A `TenantProvisioner` to safely create new tenant schemas and run initial migrations.
+  * **Auto-Initialized Registry:** Automatically creates the central **`public.tenants`** registry table when the GORM plugin is initialized. Manual SQL setup is no longer required.
+  * **Built-in CLI Migration Tool:** Provides the `gmt-migrate` binary, which supports command-line flags to override environment variable names for **microservice flexibility**.
+  * **GORM Plugin:** Automatically sets `search_path` for all GORM queries.
+  * **Gin Middleware:** Extracts the `X-Tenant-ID` header and injects the schema name into the request `context`.
   * **Security First:** Includes a function to **`LockDBConnection`** to a non-existent schema, preventing accidental cross-tenant queries on the master connection.
 
 -----
@@ -34,18 +33,15 @@ This package relies on PostgreSQL schemas. Each tenant (e.g., "acme", "globex") 
 To use this solution, you install the dependencies and the **`gmt-migrate`** CLI tool.
 
 ```bash
-# Clean if using an older version
-go clean -modcache 
+# 1. Install the plugin library using the required /v2 module path
+go get github.com/nightDevz/gorm-multitenancy/v2@v2.0.4
 
-# 1. Install the plugin library
-go get github.com/nightDevz/gorm-multitenancy/v2@v2.0.3
-
-# 2. Install the necessary dependencies
+# 2. Install the necessary dependencies (if not already installed)
 go get gorm.io/gorm github.com/gin-gonic/gin github.com/pressly/goose/v3
 go get gorm.io/driver/postgres github.com/lib/pq
 
 # 3. Install the built-in CLI migration tool (gmt-migrate)
-go install github.com/nightDevz/gorm-multitenancy/cmd/gmt-migrate@latest
+go install github.com/nightDevz/gorm-multitenancy/v2/cmd/gmt-migrate@v2.0.4
 ```
 
 -----
@@ -60,9 +56,7 @@ go install github.com/nightDevz/gorm-multitenancy/cmd/gmt-migrate@latest
     CREATE DATABASE multitenancy_poc;
     ```
 
-2.  **Configuration:** Create a `.env` file (or set environment variables) for your web service, and ensure you have the required environment variables exported for the CLI tool.
-
-    *Note: The CLI tool (`gmt-migrate`) reads from the environment variables **`DB_DSN`** and **`MIGRATIONS_DIR`**.*
+2.  **Configuration:** Define your environment variables in your local shell profile (`~/.zprofile`) or in a secure secrets manager.
 
 ### Step 2: Create Your Tenant Migrations
 
@@ -91,14 +85,13 @@ package main
 
 import (
     // ... imports, configuration loading ...
-    multitenancy "github.com/nightDevz/gorm-multitenancy"
+    multitenancy "github.com/nightDevz/gorm-multitenancy/v2"
 )
 
 // ... (Constants and Product struct) ...
 
 func main() {
     // 1. Connect to the master database
-    // (This uses BASE_DSN and loads configuration/logs)
     db := config.InitDB(BASE_DSN) 
 
     // 2. Register the GORM multitenancy plugin. 
@@ -115,34 +108,34 @@ func main() {
 }
 ```
 
-### Step 4: Running Migrations for All Existing Tenants (The `gmt-migrate` CLI)
+### Step 4: Running Migrations (The Flexible `gmt-migrate` CLI)
 
-Use the installed CLI binary to manage schema changes across all tenants.
+#### 1\. Default Execution (Local Development)
 
-1.  **Export Environment Variables:**
+If you use the default environment variable names (`DB_DSN` and `MIGRATIONS_DIR`):
 
-    ```bash
-    export DB_DSN="host=localhost user=postgres password=pass dbname=multitenancy_poc port=5432 sslmode=disable"
-    export MIGRATIONS_DIR="./migrations"
-    ```
+```bash
+export DB_DSN="host=localhost..." 
+export MIGRATIONS_DIR="./migrations"
 
-2.  **Run Migration (Apply Changes):** This command loops through every tenant registered in `public.tenants` and applies all pending `.sql` files.
+gmt-migrate up
+```
 
-    ```bash
-    gmt-migrate up
-    ```
+#### 2\. Microservice Execution (Custom ENV Names)
 
-3.  **Run Rollback (Undo Last Change):**
+If your service (e.g., a "Billing Service") uses unique, secure environment variables (e.g., `BILLING_DB_DSN`), you use the flags to tell the tool which variable to read:
 
-    ```bash
-    gmt-migrate down
-    ```
+```bash
+# Set your unique secret variable
+export BILLING_DB_DSN="host=db.billing.com..." 
+
+# Run the tool, instructing it to read the custom variable name
+gmt-migrate -dsn-env=BILLING_DB_DSN up
+```
 
 -----
 
 ## 🛠️ Database Migrations & Schema Changes
-
-This is the standard workflow for changing your schema across the multi-tenant application.
 
 ### Workflow for Adding a New Column
 
@@ -177,3 +170,4 @@ The plugin exposes the following components for integration:
   * **`multitenancy.NewTenantProvisioner(db, baseDSN, migrationsDir)`:** Tool used internally by your service to create a new tenant schema and migrate it.
   * **`multitenancy.LockDBConnection(db)`:** Security helper.
   * **`gmt-migrate` (Binary):** The dedicated command-line tool for mass schema upgrades/downgrades.
+      * Flags: `-dsn-env` and `-migrations-env` allow overriding the default environment variable names.
