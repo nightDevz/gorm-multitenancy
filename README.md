@@ -1,6 +1,6 @@
 # gorm-multitenancy
 
-Latest stable v2.0.1
+Latest stable v2.0.3
 
 A complete solution for building multi-tenant applications with GORM using the **Schema-per-Tenant** strategy. This package provides automatic, secure, and request-scoped tenant isolation by manipulating PostgreSQL's `search_path`.
 
@@ -38,7 +38,7 @@ To use this solution, you install the dependencies and the **`gmt-migrate`** CLI
 go clean -modcache 
 
 # 1. Install the plugin library
-go get github.com/nightDevz/gorm-multitenancy@v1.0.4
+go get github.com/nightDevz/gorm-multitenancy/v2@v2.0.3
 
 # 2. Install the necessary dependencies
 go get gorm.io/gorm github.com/gin-gonic/gin github.com/pressly/goose/v3

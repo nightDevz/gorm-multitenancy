@@ -6,7 +6,7 @@ import (
 	"os"
 
 	// Import the parent package
-	multitenancy "github.com/nightDevz/gorm-multitenancy"
+	multitenancy "github.com/nightDevz/gorm-multitenancy/v2"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
