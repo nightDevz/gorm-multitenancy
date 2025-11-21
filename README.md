@@ -1,6 +1,6 @@
 # gorm-multitenancy
 
-Latest stable v2.0.4
+Latest stable v2.0.5
 
 A complete solution for building multi-tenant applications with GORM using the **Schema-per-Tenant** strategy. This package provides automatic, secure, and request-scoped tenant isolation by manipulating PostgreSQL's `search_path`.
 
