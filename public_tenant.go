@@ -9,6 +9,7 @@ import (
 type PublicTenant struct {
 	ID         uint      `gorm:"primaryKey"`
 	SchemaName string    `gorm:"column:schema_name;type:varchar(63);not null;unique"`
+	IsActive   bool      `gorm:"column:is_active;type:boolean;not null;default:true"`
 	CreatedAt  time.Time `gorm:"not null;default:now()"`
 }
 
