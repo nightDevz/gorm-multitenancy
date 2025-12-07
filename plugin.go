@@ -118,12 +118,29 @@ func (p *Plugin) setSearchPathCallback(db *gorm.DB) {
 		return
 	}
 
-	// 5. Execute the query to set the search_path for this connection/transaction.
-	if err := db.Exec("SET search_path TO ?, public", safeSchemaName).Error; err != nil {
+	// // 5. Execute the query to set the search_path for this connection/transaction.
+	// if err := db.Exec("SET search_path TO ?, public", safeSchemaName).Error; err != nil {
+	// 	_ = db.AddError(fmt.Errorf("gorm-multitenancy: failed to set search_path: %w", err))
+	// 	return
+	// }
+
+	// =========================================================================
+	// 5. FIX: Use SkipHooks to prevent Recursion & SET LOCAL for Pool Safety
+	// =========================================================================
+
+	// 1. SET LOCAL: Applies the change ONLY to the current transaction.
+	//    When the transaction commits/rolls back, the path resets automatically.
+	//    This prevents "leaking" the tenant path to other users in the pool.
+	query := fmt.Sprintf("SET LOCAL search_path TO %s, public", safeSchemaName)
+
+	// 2. SkipHooks: true: This tells GORM to run this Exec without triggering
+	//    any plugins (including this one). This stops the Stack Overflow.
+	if err := db.Session(&gorm.Session{SkipHooks: true}).Exec(query).Error; err != nil {
 		_ = db.AddError(fmt.Errorf("gorm-multitenancy: failed to set search_path: %w", err))
 		return
 	}
 
 	// 6. Mark this statement/transaction as "done"
 	db.Statement.Set("multitenancy:search_path_set", true)
+
 }
