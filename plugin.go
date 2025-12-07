@@ -1,6 +1,7 @@
 package multitenancy
 
 import (
+	"context"
 	"fmt"
 	"log"
 
@@ -13,10 +14,8 @@ type Sanitizer func(string) (string, error)
 // Config holds the plugin's configuration.
 type Config struct {
 	// TenantKey is the context key used to retrieve the tenant schema.
-	// e.g., kit.TenantSchemaKey
 	TenantKey any
 	// Sanitizer is the function used to validate the schema name.
-	// e.g., kit.SanitizeSchemaName
 	Sanitizer Sanitizer
 }
 
@@ -41,48 +40,51 @@ func (p *Plugin) Name() string {
 	return "GormMultitenancyPlugin"
 }
 
+// txCommitter is a local interface to check if a connection is a transaction.
+type txCommitter interface {
+	Commit() error
+	Rollback() error
+}
+
 // Initialize registers the GORM callbacks and AutoMigrates the registry table.
 func (p *Plugin) Initialize(db *gorm.DB) error {
-	// 1. Auto-migrate the public.tenants table immediately (Option 1).
+	// 1. Auto-migrate the public.tenants table immediately.
 	log.Println("gorm-multitenancy: Checking for 'public.tenants' table...")
 	if err := db.AutoMigrate(&PublicTenant{}); err != nil {
 		return fmt.Errorf("gorm-multitenancy: failed to auto-migrate public.tenants: %w", err)
 	}
 	log.Println("gorm-multitenancy: 'public.tenants' table is ready.")
 
-	// 2. Register the callback for Create operations
-	if err := db.Callback().Create().Before("gorm:create").
-		Register("multitenancy:set_search_path", p.setSearchPathCallback); err != nil {
+	// 2. Register callbacks manually to avoid type issues with GORM versions.
+	// We use "Before" hooks to ensure the search_path is set before any SQL runs.
+
+	// Create
+	if err := db.Callback().Create().Before("gorm:create").Register("multitenancy:set_search_path", p.setSearchPathCallback); err != nil {
 		return fmt.Errorf("failed to register create callback: %w", err)
 	}
 
-	// Register the callback for Query operations
-	if err := db.Callback().Query().Before("gorm:query").
-		Register("multitenancy:set_search_path", p.setSearchPathCallback); err != nil {
+	// Query (Select)
+	if err := db.Callback().Query().Before("gorm:query").Register("multitenancy:set_search_path", p.setSearchPathCallback); err != nil {
 		return fmt.Errorf("failed to register query callback: %w", err)
 	}
 
-	// Register the callback for Update operations
-	if err := db.Callback().Update().Before("gorm:update").
-		Register("multitenancy:set_search_path", p.setSearchPathCallback); err != nil {
+	// Update
+	if err := db.Callback().Update().Before("gorm:update").Register("multitenancy:set_search_path", p.setSearchPathCallback); err != nil {
 		return fmt.Errorf("failed to register update callback: %w", err)
 	}
 
-	// Register the callback for Delete operations
-	if err := db.Callback().Delete().Before("gorm:delete").
-		Register("multitenancy:set_search_path", p.setSearchPathCallback); err != nil {
+	// Delete
+	if err := db.Callback().Delete().Before("gorm:delete").Register("multitenancy:set_search_path", p.setSearchPathCallback); err != nil {
 		return fmt.Errorf("failed to register delete callback: %w", err)
 	}
 
-	// Register the callback for Row operations
-	if err := db.Callback().Row().Before("gorm:row").
-		Register("multitenancy:set_search_path", p.setSearchPathCallback); err != nil {
+	// Row
+	if err := db.Callback().Row().Before("gorm:row").Register("multitenancy:set_search_path", p.setSearchPathCallback); err != nil {
 		return fmt.Errorf("failed to register row callback: %w", err)
 	}
 
-	// Register the callback for Raw operations
-	if err := db.Callback().Raw().Before("gorm:raw").
-		Register("multitenancy:set_search_path", p.setSearchPathCallback); err != nil {
+	// Raw SQL
+	if err := db.Callback().Raw().Before("gorm:raw").Register("multitenancy:set_search_path", p.setSearchPathCallback); err != nil {
 		return fmt.Errorf("failed to register raw callback: %w", err)
 	}
 
@@ -91,7 +93,7 @@ func (p *Plugin) Initialize(db *gorm.DB) error {
 
 // setSearchPathCallback is the core logic that sets the search_path.
 func (p *Plugin) setSearchPathCallback(db *gorm.DB) {
-	// 1. If no context is present, do nothing.
+	// 1. If no context is present, we cannot determine the tenant.
 	if db.Statement.Context == nil {
 		return
 	}
@@ -99,14 +101,10 @@ func (p *Plugin) setSearchPathCallback(db *gorm.DB) {
 	// 2. Try to get the tenant schema from the context.
 	schema, ok := db.Statement.Context.Value(p.config.TenantKey).(string)
 	if !ok || schema == "" {
-		// No tenant key found. This is a "public" query
-		// (e.g., login, provision). Do nothing.
 		return
 	}
 
-	// 3. Check if we've already set this for the transaction.
-	// This is a crucial optimization to avoid running SET search_path
-	// multiple times in a single transaction.
+	// 3. Optimization: Check if we've already set the path for this GORM statement/scope.
 	if _, ok := db.Statement.Get("multitenancy:search_path_set"); ok {
 		return
 	}
@@ -118,29 +116,30 @@ func (p *Plugin) setSearchPathCallback(db *gorm.DB) {
 		return
 	}
 
-	// // 5. Execute the query to set the search_path for this connection/transaction.
-	// if err := db.Exec("SET search_path TO ?, public", safeSchemaName).Error; err != nil {
-	// 	_ = db.AddError(fmt.Errorf("gorm-multitenancy: failed to set search_path: %w", err))
-	// 	return
-	// }
+	// 5. SAFETY CHECK: Ensure we are inside a Transaction.
+	if _, ok := db.Statement.ConnPool.(txCommitter); !ok {
+		log.Printf("[gorm-multitenancy] ⚠️ WARNING: Tenant operation on schema '%s' is NOT running in a transaction! "+
+			"This may cause data leaks due to connection pooling. Wrap your operation in db.Transaction(...).", safeSchemaName)
+	}
 
 	// =========================================================================
-	// 5. FIX: Use SkipHooks to prevent Recursion & SET LOCAL for Pool Safety
+	// FIX: Context Scrubbing & SkipHooks
 	// =========================================================================
 
-	// 1. SET LOCAL: Applies the change ONLY to the current transaction.
-	//    When the transaction commits/rolls back, the path resets automatically.
-	//    This prevents "leaking" the tenant path to other users in the pool.
+	// A. Create a clean context to act as a "Circuit Breaker" for recursion.
+	cleanCtx := context.Background()
+
+	// B. Construct the query using SET LOCAL.
 	query := fmt.Sprintf("SET LOCAL search_path TO %s, public", safeSchemaName)
 
-	// 2. SkipHooks: true: This tells GORM to run this Exec without triggering
-	//    any plugins (including this one). This stops the Stack Overflow.
-	if err := db.Session(&gorm.Session{SkipHooks: true}).Exec(query).Error; err != nil {
+	// C. Execute using:
+	// - cleanCtx: Prevents plugin from triggering recursively.
+	// - SkipHooks: Optimizes execution by telling GORM to skip hooks for this command.
+	if err := db.Session(&gorm.Session{Context: cleanCtx, SkipHooks: true}).Exec(query).Error; err != nil {
 		_ = db.AddError(fmt.Errorf("gorm-multitenancy: failed to set search_path: %w", err))
 		return
 	}
 
-	// 6. Mark this statement/transaction as "done"
+	// 6. Mark this statement as processed.
 	db.Statement.Set("multitenancy:search_path_set", true)
-
 }
