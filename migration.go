@@ -11,19 +11,19 @@ import (
 
 // MigrationRunner handles running migrations across all tenants.
 type MigrationRunner struct {
-	db            *gorm.DB // Master connection, for getting tenant list
-	baseDSN       string   // Base DSN to create new connections
+	db            *gorm.DB
+	writerDSN     string
 	migrationsDir string
 }
 
 // NewMigrationRunner creates a new MigrationRunner.
-func NewMigrationRunner(db *gorm.DB, baseDSN string, migrationsDir string) *MigrationRunner {
-	if err := goose.SetDialect("postgres"); err != nil { // Or your dialect
-		log.Fatalf("❌ Failed to set goose dialect: %v", err)
+func NewMigrationRunner(db *gorm.DB, writerDSN string, migrationsDir string) *MigrationRunner {
+	if err := goose.SetDialect("postgres"); err != nil {
+		log.Fatalf("[gorm-multitenancy] ❌ Failed to set goose dialect: %v", err)
 	}
 	return &MigrationRunner{
 		db:            db,
-		baseDSN:       baseDSN,
+		writerDSN:     writerDSN,
 		migrationsDir: migrationsDir,
 	}
 }
@@ -40,27 +40,25 @@ func (r *MigrationRunner) RunUp() error {
 	for _, tenant := range tenants {
 		safeSchemaName, err := SanitizeSchemaName(tenant.SchemaName)
 		if err != nil {
-			log.Printf("⚠️ SKIPPING tenant %s: invalid name in registry: %v", tenant.SchemaName, err)
+			log.Printf("⚠️  SKIPPING tenant %s: invalid name in registry: %v", tenant.SchemaName, err)
 			continue
 		}
 
 		log.Printf("--- Migrating tenant: %s ---", safeSchemaName)
 
-		// Create a new, scoped connection *for each tenant*
 		tenantDB, err := r.getTenantDB(safeSchemaName)
 		if err != nil {
-			log.Printf("⚠️ SKIPPING tenant %s: failed to create DB connection: %v", safeSchemaName, err)
+			log.Printf("⚠️  SKIPPING tenant %s: failed to create DB connection: %v", safeSchemaName, err)
 			continue
 		}
 
-		// Run goose.Up on the scoped *sql.DB
 		if err := goose.Up(tenantDB, r.migrationsDir); err != nil {
 			log.Printf("❌ FAILED migration for tenant %s: %v", safeSchemaName, err)
 		} else {
 			log.Printf("✅ Successfully migrated tenant: %s", safeSchemaName)
 		}
 
-		tenantDB.Close() // Close the pool for this tenant
+		tenantDB.Close()
 	}
 
 	log.Println("--- All tenant 'up' migrations complete. ---")
@@ -79,7 +77,6 @@ func (r *MigrationRunner) RunDown() error {
 	for _, tenant := range tenants {
 		safeSchemaName, err := SanitizeSchemaName(tenant.SchemaName)
 		if err != nil {
-			log.Printf("⚠️ SKIPPING tenant %s: invalid name in registry: %v", tenant.SchemaName, err)
 			continue
 		}
 
@@ -87,18 +84,17 @@ func (r *MigrationRunner) RunDown() error {
 
 		tenantDB, err := r.getTenantDB(safeSchemaName)
 		if err != nil {
-			log.Printf("⚠️ SKIPPING tenant %s: failed to create DB connection: %v", safeSchemaName, err)
+			log.Printf("⚠️  SKIPPING tenant %s: failed to connect: %v", safeSchemaName, err)
 			continue
 		}
 
-		// Run goose.Down on the scoped *sql.DB
 		if err := goose.Down(tenantDB, r.migrationsDir); err != nil {
 			log.Printf("❌ FAILED rollback for tenant %s: %v", safeSchemaName, err)
 		} else {
 			log.Printf("✅ Successfully rolled back tenant: %s", safeSchemaName)
 		}
 
-		tenantDB.Close() // Close the pool
+		tenantDB.Close()
 	}
 
 	log.Println("--- All tenant 'down' migrations complete. ---")
@@ -107,10 +103,10 @@ func (r *MigrationRunner) RunDown() error {
 
 // getTenantDB creates a new *sql.DB pool scoped to a specific tenant.
 func (r *MigrationRunner) getTenantDB(safeSchemaName string) (*sql.DB, error) {
-	// Note: DSN format varies. This " " space separator works for lib/pq.
-	tenantDSN := fmt.Sprintf("%s search_path=%s,public", r.baseDSN, safeSchemaName)
+	// DDL requires the Writer DSN
+	tenantDSN := fmt.Sprintf("%s search_path=%s,public", r.writerDSN, safeSchemaName)
 
-	tenantDB, err := sql.Open("postgres", tenantDSN) // Use your driver name
+	tenantDB, err := sql.Open("postgres", tenantDSN)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open tenant-scoped DB connection: %w", err)
 	}
@@ -122,7 +118,7 @@ func (r *MigrationRunner) getTenantDB(safeSchemaName string) (*sql.DB, error) {
 	return tenantDB, nil
 }
 
-// getAllTenants fetches the list of schemas from the registry (uses master db).
+// getAllTenants fetches the list of schemas from the registry.
 func (r *MigrationRunner) getAllTenants() ([]PublicTenant, error) {
 	var tenants []PublicTenant
 	if err := r.db.Find(&tenants).Error; err != nil {

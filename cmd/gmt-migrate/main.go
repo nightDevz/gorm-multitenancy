@@ -1,40 +1,39 @@
 package main
 
 import (
-	"flag" // New import for command-line flags
+	"bufio"
+	"flag"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
-	// Import the parent package
 	multitenancy "github.com/nightDevz/gorm-multitenancy/v2"
-
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
-	// Import lib/pq for the sql.Open call inside provisioner/runner
 	_ "github.com/lib/pq"
 )
 
-// These variables hold the environment key names and are initialized with defaults.
-// They are updated by the 'flag' package during parsing.
-var dsnEnvKey string
-var migrationsDirEnvKey string
+var (
+	dsnEnvKey           string
+	migrationsDirEnvKey string
+	forceFlag           bool
+)
 
 func init() {
-	// Define command-line flags that allow overriding the default environment variable names.
-	flag.StringVar(&dsnEnvKey, "dsn-env", "DB_DSN", "Environment variable name containing the PostgreSQL DSN.")
+	flag.StringVar(&dsnEnvKey, "dsn-env", "DB_DSN", "Environment variable name containing the PostgreSQL WRITER DSN.")
 	flag.StringVar(&migrationsDirEnvKey, "migrations-env", "MIGRATIONS_DIR", "Environment variable name containing the path to migration files.")
+	flag.BoolVar(&forceFlag, "force", false, "Skip confirmation prompts (Dangerous). Use for CI/CD automation.")
 }
 
 func main() {
-	// Parse the flags defined in init(). This populates dsnEnvKey and migrationsDirEnvKey.
 	flag.Parse()
 
-	// 1. Load configuration from Environment Variables using the flag-determined keys.
-	baseDSN := os.Getenv(dsnEnvKey)
-	if baseDSN == "" {
-		log.Fatalf("❌ Error: DSN environment variable '%s' is required.", dsnEnvKey)
+	// 1. Load configuration
+	writerDSN := os.Getenv(dsnEnvKey)
+	if writerDSN == "" {
+		log.Fatalf("❌ Error: WRITER DSN environment variable '%s' is required.", dsnEnvKey)
 	}
 
 	migrationsDir := os.Getenv(migrationsDirEnvKey)
@@ -42,8 +41,8 @@ func main() {
 		log.Fatalf("❌ Error: Migrations directory environment variable '%s' is required.", migrationsDirEnvKey)
 	}
 
-	// 2. Connect to DB
-	db, err := gorm.Open(postgres.Open(baseDSN), &gorm.Config{})
+	// 2. Connect to DB (Used for reading tenant list)
+	db, err := gorm.Open(postgres.Open(writerDSN), &gorm.Config{})
 	if err != nil {
 		log.Fatalf("❌ Failed to connect to database: %v", err)
 	}
@@ -54,19 +53,18 @@ func main() {
 	// 4. Create the migration runner
 	runner := multitenancy.NewMigrationRunner(
 		db,
-		baseDSN,
+		writerDSN, // Explicitly pass the Writer DSN
 		migrationsDir,
 	)
 
-	// 5. Parse command-line arguments (the actual command: up or down)
+	// 5. Parse command
 	if len(flag.Args()) < 1 {
 		printUsage()
 		os.Exit(1)
 	}
 
-	command := flag.Args()[0] // Get the first non-flag argument (e.g., "up")
+	command := flag.Args()[0]
 
-	// 6. Run the command
 	switch command {
 	case "up":
 		log.Println("🔄 Running 'up' migrations for all tenants...")
@@ -74,7 +72,12 @@ func main() {
 			log.Fatalf("❌ Migration 'up' failed: %v", err)
 		}
 	case "down":
-		log.Println("🔄 Running 'down' migration for all tenants...")
+		// SAFETY CHECK: Prompt user before destroying data, unless forced via flag
+		if !forceFlag {
+			warnUserAndConfirm()
+		}
+
+		log.Println("⚠️  Running 'down' migration for all tenants...")
 		if err := runner.RunDown(); err != nil {
 			log.Fatalf("❌ Migration 'down' failed: %v", err)
 		}
@@ -84,7 +87,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Println("✅ Migration run complete.")
+	log.Println("✅ Run complete.")
+}
+
+func warnUserAndConfirm() {
+	fmt.Println("\n⚠️  DANGER: You are about to run a 'DOWN' migration on ALL tenants.")
+	fmt.Println("This can result in IRREVERSIBLE DATA LOSS (dropping tables/columns).")
+	fmt.Print("Are you sure you want to proceed? (type 'yes' to confirm): ")
+
+	reader := bufio.NewReader(os.Stdin)
+	response, _ := reader.ReadString('\n')
+	response = strings.TrimSpace(response)
+
+	if strings.ToLower(response) != "yes" {
+		fmt.Println("❌ Aborted by user.")
+		os.Exit(1)
+	}
 }
 
 func printUsage() {
@@ -93,8 +111,7 @@ func printUsage() {
 	fmt.Println("Usage:")
 	fmt.Println("  gmt-migrate [flags] up      # Apply pending migrations to all tenants")
 	fmt.Println("  gmt-migrate [flags] down    # Rollback last migration for all tenants")
-	fmt.Println("\nFlags (Environment Variable Overrides):")
+	fmt.Println("\nFlags:")
 	flag.PrintDefaults()
-	fmt.Println("\nExample (Using custom environment variables):")
-	fmt.Println("  gmt-migrate -dsn-env=POC_DB_DSN -migrations-env=APP_MIGRATIONS_DIR up")
+	fmt.Println("\nNote: The DSN provided MUST be the WRITER endpoint (for creating tables).")
 }
