@@ -85,53 +85,44 @@ func (p *Plugin) Initialize(db *gorm.DB) error {
 
 // setSearchPathCallback attempts to extract the tenant from the context and sets the search_path.
 func (p *Plugin) setSearchPathCallback(db *gorm.DB) {
-	// 1. If no context is present, we cannot determine the tenant.
+	// 1. Context Safety: If no context, we can't do anything.
 	if db.Statement.Context == nil {
 		return
 	}
 
-	// 2. Try to get the tenant schema from the context.
+	// 2. CIRCUIT BREAKER: Check if this specific statement is already processed
+	// OR if this is an internal multitenancy command.
+	if _, skip := db.Statement.Get("multitenancy:skip_callback"); skip {
+		return
+	}
+
+	// 3. Extract Tenant
 	schema, ok := db.Statement.Context.Value(p.config.TenantKey).(string)
 	if !ok || schema == "" {
 		return
 	}
 
-	// 3. Optimization: Check if we've already set the path for this specific GORM statement/scope.
-	if _, ok := db.Statement.Get("multitenancy:search_path_set"); ok {
-		return
-	}
-
-	// 4. Sanitize the schema name to prevent SQL injection.
+	// 4. Sanitize
 	safeSchemaName, err := p.config.Sanitizer(schema)
 	if err != nil {
 		_ = db.AddError(fmt.Errorf("gorm-multitenancy: %w", err))
 		return
 	}
 
-	// 5. Connection Safety Check
-	// We strictly require a Transaction. 'SET LOCAL' applies only to the current transaction.
-	// If run on a standard pooled connection, the path change might leak or fail to apply to subsequent queries.
-	if _, ok := db.Statement.ConnPool.(txCommitter); !ok {
-		log.Printf("[gorm-multitenancy] ⚠️  WARNING: Tenant operation on schema '%s' is NOT running in a transaction! "+
-			"This may cause data leaks. Please use multitenancy.ReadWriteTransaction(...) or multitenancy.ReadOnlyTransaction(...).", safeSchemaName)
-	}
-
-	// 6. Execute Schema Switch
-	// We execute this directly on the underlying database connection pool rather than
-	// using GORM's db.Session().Exec(). This prevents GORM from accidentally inheriting
-	// db.Statement.Vars (causing "mismatched param" panics) or db.Statement.Schema
-	// (causing "invalid field" reflection panics) from the parent query.
-
-	// 6. Execute Schema Switch
+	// 5. THE FIX: Execute "Quietly"
 	query := fmt.Sprintf("SET LOCAL search_path TO %s, public", safeSchemaName)
 
-	// Use InstanceSet to prevent the plugin from calling itself recursively
-	// and use a New Session to ensure we don't pollute the main statement's error state.
-	if err := db.Session(&gorm.Session{NewDB: true}).Exec(query).Error; err != nil {
+	// We create a new session and set "multitenancy:skip_callback" to true.
+	// This ensures that when db.Exec runs, the plugin sees the flag and exits at Step 2.
+	err = db.Session(&gorm.Session{NewDB: true}).
+		Set("multitenancy:skip_callback", true).
+		Exec(query).Error
+
+	if err != nil {
 		_ = db.AddError(fmt.Errorf("gorm-multitenancy: failed to set search_path: %w", err))
 		return
 	}
 
-	// 7. Mark this statement as processed.
-	db.Statement.Set("multitenancy:search_path_set", true)
+	// 6. Mark the original statement as done so we don't repeat this in the same chain
+	db.Statement.Set("multitenancy:skip_callback", true)
 }
