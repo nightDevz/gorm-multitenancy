@@ -118,19 +118,16 @@ func (p *Plugin) setSearchPathCallback(db *gorm.DB) {
 	}
 
 	// 6. Execute Schema Switch
-	// We use a specific pattern here to prevent "Callback Recursion" (Stack Overflow).
+	// We execute this directly on the underlying database connection pool rather than
+	// using GORM's db.Session().Exec(). This prevents GORM from accidentally inheriting
+	// db.Statement.Vars (causing "mismatched param" panics) or db.Statement.Schema
+	// (causing "invalid field" reflection panics) from the parent query.
 
-	// A. Create a clean context. If GORM triggers this callback again recursively,
-	//    it will see this empty context and exit immediately (Step 2).
-	cleanCtx := context.Background()
-
-	// B. Construct the query using SET LOCAL.
+	cleanCtx := context.Background() // Circuit breaker for recursion
 	query := fmt.Sprintf("SET LOCAL search_path TO %s, public", safeSchemaName)
 
-	// C. Execute using a new Session with SkipHooks.
-	//    - Context: cleanCtx (Circuit breaker for recursion)
-	//    - SkipHooks: true (Performance optimization, tells GORM not to trigger plugins for this internal command)
-	if err := db.Session(&gorm.Session{Context: cleanCtx, SkipHooks: true}).Exec(query).Error; err != nil {
+	// Bypass GORM and execute raw SQL directly on the active connection/transaction
+	if _, err := db.Statement.ConnPool.ExecContext(cleanCtx, query); err != nil {
 		_ = db.AddError(fmt.Errorf("gorm-multitenancy: failed to set search_path: %w", err))
 		return
 	}
