@@ -1,7 +1,6 @@
 package multitenancy
 
 import (
-	"context"
 	"fmt"
 	"log"
 
@@ -123,11 +122,12 @@ func (p *Plugin) setSearchPathCallback(db *gorm.DB) {
 	// db.Statement.Vars (causing "mismatched param" panics) or db.Statement.Schema
 	// (causing "invalid field" reflection panics) from the parent query.
 
-	cleanCtx := context.Background() // Circuit breaker for recursion
+	// 6. Execute Schema Switch
 	query := fmt.Sprintf("SET LOCAL search_path TO %s, public", safeSchemaName)
 
-	// Bypass GORM and execute raw SQL directly on the active connection/transaction
-	if _, err := db.Statement.ConnPool.ExecContext(cleanCtx, query); err != nil {
+	// Use InstanceSet to prevent the plugin from calling itself recursively
+	// and use a New Session to ensure we don't pollute the main statement's error state.
+	if err := db.Session(&gorm.Session{NewDB: true}).Exec(query).Error; err != nil {
 		_ = db.AddError(fmt.Errorf("gorm-multitenancy: failed to set search_path: %w", err))
 		return
 	}
